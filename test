@@ -1,0 +1,112 @@
+#!/bin/sh
+# Run scrcpy-android tests inside the project-local Docker image.
+#
+#   ./test          unit tests (JVM only, no KVM)
+#   ./test unit     same
+#   ./test e2e      real two-emulator pairing/mirroring E2E (needs /dev/kvm)
+#   ./test all      unit + e2e
+#   ./test screenshots
+#                   boot emulator, capture the fastlane store screenshots
+#                   into fastlane/metadata/.../phoneScreenshots (needs /dev/kvm)
+#   ./test apk      build a signed release APK with a throwaway keystore
+#                   (exercises scripts/build-apk end-to-end, no KVM)
+#   ./test server   build and verify the pinned scrcpy server source
+#
+# The image is built on first run and cached as $IMG.
+# /dev/kvm must be readable by the invoking user for e2e and screenshots.
+
+set -eu
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cmd="${1:-unit}"
+
+mkdir -p "$ROOT/.tools"
+exec 9>"$ROOT/.tools/test.lock"
+if ! flock -n 9; then
+    echo "test: another repository test is running" >&2
+    exit 3
+fi
+
+target=unit
+case "$cmd" in
+    e2e|all|screenshots) target=e2e ;;
+esac
+
+# The image tag is a hash of the rig inputs, so editing the Dockerfile
+# or the SDK package list automatically invalidates the cached image.
+IMG="scrcpy-android-test-$target:$(cat "$ROOT/test-rig/Dockerfile" \
+    "$ROOT/test-rig/sdk-packages.txt" "$ROOT/test-rig/sdk-packages-e2e.txt" \
+    | sha256sum | cut -c1-12)"
+
+case "$cmd" in
+    unit|server|e2e|all|screenshots|apk) ;;
+    -h|--help)
+        # Usage is the header comment block: print from line 2 down to
+        # the first non-comment line.
+        awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2
+        exit 0 ;;
+    *)
+        echo "usage: $0 [unit|server|e2e|all|screenshots|apk]" >&2
+        exit 2 ;;
+esac
+
+# Cheap supply-chain check: the gradle wrapper jar is a small binary
+# we check into the tree; verify its sha before letting it run.
+"$ROOT/scripts/check-wrapper"
+"$ROOT/scripts/check-server"
+
+# Build the image if needed. --network=host so RUN apt/curl can reach
+# the outside on hosts where the default docker bridge has no DNS.
+if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "test: building $IMG (first run, ~10 min)" >&2
+    # Cheap pre-flight: warn the user up-front if the host can't resolve
+    # the docker registry, so they don't watch an apt step time out.
+    if ! getent hosts registry-1.docker.io >/dev/null 2>&1; then
+        echo "test: WARNING - registry-1.docker.io did not resolve via /etc/resolv.conf." >&2
+        echo "             Build will likely fail. Fix the host DNS (e.g." >&2
+        echo "             append 'nameserver 1.1.1.1' to /etc/resolv.conf) and retry." >&2
+    fi
+    docker build --network=host --target "$target" -t "$IMG" "$ROOT/test-rig"
+fi
+
+# KVM check for tiers that boot the emulator.
+needs_kvm=
+KVM_GID=
+case "$cmd" in
+    e2e|all|screenshots) needs_kvm=1 ;;
+esac
+
+if [ -n "$needs_kvm" ]; then
+    if [ ! -e /dev/kvm ]; then
+        echo "test: /dev/kvm not present on this host - e2e cannot run." >&2
+        exit 3
+    fi
+    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        echo "test: /dev/kvm exists but is not rw for uid $(id -u)." >&2
+        echo "      one-time fix:" >&2
+        echo "          sudo usermod -aG kvm $(id -un)" >&2
+        echo "      then log out and back in" >&2
+        exit 3
+    fi
+    # Pass through /dev/kvm's owning gid (numeric - group names from the
+    # host don't exist inside the container) so the container user
+    # (mapped to host uid:gid) can actually open it.
+    KVM_GID=$(stat -c %g /dev/kvm)
+fi
+
+# Forward Ctrl-C cleanly, run as the host user so files in .tools/ stay
+# owned by the invoker (avoids root-owned gradle cache on the host).
+# --network=host so the gradle wrapper can fetch the distribution and
+# maven deps in environments where the docker bridge DNS misbehaves.
+set -- docker run --rm -i --network=host
+if [ -n "$needs_kvm" ]; then
+    set -- "$@" --device /dev/kvm --group-add "$KVM_GID" \
+        --tmpfs /work/.tools/avd:rw,size=10g,mode=1777
+fi
+exec "$@" \
+    -u "$(id -u):$(id -g)" \
+    -v "$ROOT":/work \
+    -w /work \
+    -e ANDROID_USER_HOME=/work/.tools/android-home \
+    "$IMG" \
+    /work/test-rig/run.sh "$cmd"

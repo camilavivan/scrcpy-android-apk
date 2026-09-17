@@ -1,0 +1,6 @@
+Fix Opus playback, decoder recovery, reconnect races, and partial connection
+cleanup. Bound media and input queues, harden saved-device and recording error
+handling, and verify the bundled scrcpy server during every APK build.
+
+Continuous mirroring now uses Android's media-playback foreground-service type
+instead of the time-limited data-sync type. This adds no runtime prompt.

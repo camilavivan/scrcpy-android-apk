@@ -1,0 +1,6 @@
+The pairing form now takes the device address as one "ip:port" field, copied
+straight off the target's Wireless debugging screen, plus the pairing port
+and code from the pairing dialog.
+
+Fixed the main and settings screens drawing under the status and navigation
+bars on Android 15.

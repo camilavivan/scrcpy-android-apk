@@ -1,0 +1,5 @@
+Fix aspect ratio, rotation, touch mapping, cancellation, and reconnects.
+Fix Opus playback timing and recover video under decoder pressure.
+Avoid device-specific frame-rate encoder failures.
+Use a gesture-safe viewport, and show the installed
+version in Settings. Require Wireless ADB TLS and update to scrcpy 4.1.

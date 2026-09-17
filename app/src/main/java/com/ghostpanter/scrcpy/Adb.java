@@ -1,0 +1,375 @@
+package com.ghostpanter.scrcpy;
+
+import android.content.Context;
+
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1Encoding;
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.x509.TBSCertificate;
+import org.bouncycastle.asn1.x509.Time;
+import org.bouncycastle.asn1.x509.V3TBSCertificateGenerator;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.math.BigInteger;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.interfaces.RSAPrivateCrtKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.RSAPublicKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.concurrent.TimeUnit;
+
+import io.github.muntashirakon.adb.AdbConnection;
+import io.github.muntashirakon.adb.AdbStream;
+import io.github.muntashirakon.adb.PairingConnectionCtx;
+
+// Thin facade over libadb-android. One instance per process: pairs once,
+// connects per session, then exposes typed openers for the three streams
+// the rest of the app cares about (shell, sync, localabstract).
+//
+// The keypair lives in filesDir/{adbkey,adbcert}: PKCS#8 DER for the key and
+// X.509 DER for the certificate. This matches adb's file-backed identity and
+// keeps both pairing and later TLS authentication on one stable key. Android
+// backup is disabled so the private key stays on the device that created it.
+public final class Adb {
+
+    private static final String DEVICE_NAME = "scrcpy-ghostpanter";
+    private static final String KEY_FILE = "adbkey";
+    private static final String CERT_FILE = "adbcert";
+
+    // Per-operation timeout for adb protocol calls (pair/connect/openStream).
+    // libadb-android defaults to Long.MAX_VALUE; a hung target would block
+    // forever otherwise.
+    private static final long OP_TIMEOUT_MS = 15_000L;
+
+    private static final int MAX_KEY_FILE_BYTES = 16 * 1024;
+    private static final int MAX_CERT_FILE_BYTES = 64 * 1024;
+
+    // Singleton: Main and Mirror both want an Adb; building two would
+    // race on the on-disk keypair and waste a RSA generation. Lazily
+    // initialised on the FIRST caller, which should be off the UI thread.
+    private static volatile Adb instance;
+
+    public static Adb getInstance(Context ctx) throws Exception {
+        Adb local = instance;
+        if (local != null) return local;
+        synchronized (Adb.class) {
+            if (instance == null) instance = new Adb(ctx.getApplicationContext());
+            return instance;
+        }
+    }
+
+    private final PrivateKey privateKey;
+    private final Certificate certificate;
+    private volatile AdbConnection connection;
+    private volatile AdbConnection connecting;
+
+    private Adb(Context ctx) throws Exception {
+        File keyFile = new File(ctx.getFilesDir(), KEY_FILE);
+        File certFile = new File(ctx.getFilesDir(), CERT_FILE);
+        KeyPair pair;
+        if (keyFile.exists()) {
+            try {
+                pair = keyPair(loadKey(keyFile));
+            } catch (Exception e) {
+                // A missing or broken certificate is recoverable without
+                // changing identity. A broken private key is not.
+                pair = generateRsa();
+                saveKey(keyFile, pair.getPrivate());
+                Log.w("adb: replaced unreadable private key: %s", e);
+            }
+        } else {
+            pair = generateRsa();
+            saveKey(keyFile, pair.getPrivate());
+            Log.i("adb: generated new private key at %s", keyFile);
+        }
+
+        privateKey = pair.getPrivate();
+        Certificate loaded;
+        try {
+            loaded = loadCert(certFile);
+            verifyKeyPair(privateKey, loaded);
+        } catch (Exception e) {
+            // The certificate is only a public wrapper around the stable
+            // private key. Rebuild it after corruption or an interrupted
+            // first launch without rotating the ADB identity.
+            loaded = selfSignedCert(pair);
+            saveCert(certFile, loaded);
+            Log.w("adb: rebuilt certificate for stored private key: %s", e);
+        }
+        certificate = loaded;
+        Log.i("adb: identity ready from %s", keyFile);
+    }
+
+    // Pairing authenticates the six-digit-code exchange with SPAKE2 and
+    // authorizes this app's stable client key on the target.
+    public synchronized void pairDevice(String host, int port, String code) throws Exception {
+        validateEndpoint(host, port);
+        if (code == null || !code.matches("[0-9]{6}")) {
+            throw new IllegalArgumentException("pairing code must be exactly six digits");
+        }
+        byte[] password = code.getBytes(StandardCharsets.US_ASCII);
+        try {
+            try (PairingConnectionCtx pairing = new PairingConnectionCtx(
+                    host, port, password, privateKey, certificate, DEVICE_NAME)) {
+                pairing.start();
+            }
+        } finally {
+            Arrays.fill(password, (byte) 0);
+        }
+    }
+
+    public synchronized void connect(String host, int port) throws Exception {
+        validateEndpoint(host, port);
+        AdbConnection next = null;
+        try {
+            disconnect();
+            next = new AdbConnection.Builder(host, port)
+                    .setPrivateKey(privateKey)
+                    .setCertificate(certificate)
+                    .build();
+            connecting = next;
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("ADB connect cancelled");
+            }
+            if (!next.connect(OP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                throw new IOException("adb connect timed out");
+            }
+            connection = next;
+            next = null;
+        } catch (Exception e) {
+            closeAfterFailure(next, e);
+            throw e;
+        } finally {
+            connecting = null;
+        }
+    }
+
+    public synchronized void disconnect() throws IOException {
+        AdbConnection current = connection;
+        connection = null;
+        if (current != null) current.close();
+    }
+
+    // Cancel a blocked connect, open, read, or write without waiting for this
+    // facade's monitor. Session uses this from its deadline and stop paths.
+    public void abort() {
+        AdbConnection pending = connecting;
+        AdbConnection current = connection;
+        closeQuietly(pending);
+        if (current != pending) closeQuietly(current);
+    }
+
+    private static void closeAfterFailure(AdbConnection candidate, Exception failure) {
+        if (candidate == null) return;
+        try { candidate.close(); }
+        catch (IOException e) { failure.addSuppressed(e); }
+    }
+
+    private static void closeQuietly(AdbConnection candidate) {
+        if (candidate == null) return;
+        try { candidate.close(); }
+        catch (IOException e) { Log.w("adb: abort failed: %s", e); }
+    }
+
+    // ---- typed openers ----
+
+    public synchronized AdbStream openAbstract(String name) throws IOException, InterruptedException {
+        if (name == null || name.isEmpty() || name.length() > 255 || name.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("invalid abstract socket name");
+        }
+        return openDestination("localabstract:" + name);
+    }
+
+    public synchronized AdbStream openShell(String cmd) throws IOException, InterruptedException {
+        if (cmd == null || cmd.isEmpty() || cmd.length() > 4096 || cmd.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("invalid shell command");
+        }
+        return openDestination("shell:" + cmd);
+    }
+
+    public synchronized AdbStream openSync() throws IOException, InterruptedException {
+        return openDestination("sync:");
+    }
+
+    private AdbStream openDestination(String destination) throws IOException, InterruptedException {
+        AdbConnection current = connection;
+        if (current == null || !current.isConnectionEstablished()) {
+            throw new IOException("not connected to ADB");
+        }
+        return current.open(destination, OP_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    }
+
+    // ---- key + cert I/O ----
+
+    private static KeyPair generateRsa() throws Exception {
+        KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
+        gen.initialize(2048, new SecureRandom());
+        return gen.generateKeyPair();
+    }
+
+    private static KeyPair keyPair(PrivateKey key) throws Exception {
+        if (!(key instanceof RSAPrivateCrtKey rsa)) {
+            throw new IOException("stored ADB identity is not an RSA CRT key");
+        }
+        if (rsa.getModulus().bitLength() != 2048
+                || (!BigInteger.valueOf(3).equals(rsa.getPublicExponent())
+                && !BigInteger.valueOf(65537).equals(rsa.getPublicExponent()))) {
+            throw new IOException("stored ADB identity has unsupported RSA parameters");
+        }
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(
+                new RSAPublicKeySpec(rsa.getModulus(), rsa.getPublicExponent()));
+        return new KeyPair(publicKey, key);
+    }
+
+    private static PrivateKey loadKey(File f) throws Exception {
+        byte[] data = readLimited(f, MAX_KEY_FILE_BYTES);
+        try {
+            return KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(data));
+        } finally {
+            Arrays.fill(data, (byte) 0);
+        }
+    }
+
+    private static Certificate loadCert(File f) throws Exception {
+        byte[] data = readLimited(f, MAX_CERT_FILE_BYTES);
+        return CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(data));
+    }
+
+    private static void saveKey(File f, PrivateKey k) throws IOException {
+        byte[] data = k.getEncoded();
+        try {
+            AtomicFiles.write(f, data);
+        } finally {
+            Arrays.fill(data, (byte) 0);
+        }
+    }
+
+    private static void saveCert(File f, Certificate c) throws Exception {
+        AtomicFiles.write(f, c.getEncoded());
+    }
+
+    private static void verifyKeyPair(PrivateKey key, Certificate cert) throws IOException {
+        if (!(key instanceof RSAPrivateCrtKey) || !(cert.getPublicKey() instanceof RSAPublicKey)) {
+            throw new IOException("stored ADB identity is not an RSA keypair");
+        }
+        RSAPrivateCrtKey privateRsa = (RSAPrivateCrtKey) key;
+        RSAPublicKey publicRsa = (RSAPublicKey) cert.getPublicKey();
+        if (!privateRsa.getModulus().equals(publicRsa.getModulus())
+                || !privateRsa.getPublicExponent().equals(publicRsa.getPublicExponent())) {
+            throw new IOException("stored ADB private key and certificate do not match");
+        }
+    }
+
+    private static byte[] readLimited(File file, int maxBytes) throws IOException {
+        if (!file.isFile()) throw new IOException("not a regular file: " + file);
+        try (InputStream in = new FileInputStream(file);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[4096];
+            int total = 0;
+            for (;;) {
+                int n = in.read(buf);
+                if (n < 0) break;
+                if (n == 0) throw new IOException("identity file read made no progress");
+                if (total > maxBytes - n) throw new IOException("identity file is too large");
+                out.write(buf, 0, n);
+                total += n;
+            }
+            if (total == 0) throw new IOException("identity file is empty");
+            return out.toByteArray();
+        }
+    }
+
+    private static void validateEndpoint(String host, int port) {
+        if (host == null || host.isEmpty() || host.length() > 255) {
+            throw new IllegalArgumentException("host is invalid");
+        }
+        for (int i = 0; i < host.length(); i++) {
+            char c = host.charAt(i);
+            if (Character.isWhitespace(c) || Character.isISOControl(c)
+                    || c == '[' || c == ']') {
+                throw new IllegalArgumentException("host is invalid");
+            }
+        }
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("port is invalid");
+    }
+
+    // Build a minimal self-signed X.509 certificate over the keypair.
+    //
+    // ASN.1 layout (RFC 5280 sec. 4.1):
+    //
+    //   Certificate ::= SEQUENCE {
+    //     tbsCertificate       TBSCertificate,
+    //     signatureAlgorithm   AlgorithmIdentifier,    -- sha256WithRSAEnc
+    //     signature            BIT STRING               -- RSA over tbs
+    //   }
+    //
+    //   TBSCertificate ::= SEQUENCE {
+    //     version              [0] EXPLICIT v3,
+    //     serialNumber         INTEGER 1,
+    //     signatureAlgorithm   AlgorithmIdentifier,
+    //     issuer  = subject    Name (CN=scrcpy-android),
+    //     validity             { notBefore, notAfter },
+    //     subjectPublicKeyInfo SubjectPublicKeyInfo
+    //   }
+    //
+    // ADB authorizes this identity by the public key embedded in the
+    // certificate. The DN is only a local label, but a valid self-signed
+    // X.509 certificate is required by the TLS pairing and connect paths.
+    private static Certificate selfSignedCert(KeyPair kp) throws Exception {
+        long now = System.currentTimeMillis();
+        Date notBefore = new Date(now - 60_000L);
+        Date notAfter  = new Date(now + 50L * 365 * 24 * 3600 * 1000L);
+        X500Name dn = new X500Name("CN=" + DEVICE_NAME);
+        AlgorithmIdentifier sigAlg =
+                new AlgorithmIdentifier(PKCSObjectIdentifiers.sha256WithRSAEncryption);
+
+        V3TBSCertificateGenerator g = new V3TBSCertificateGenerator();
+        g.setSerialNumber(new ASN1Integer(BigInteger.ONE));
+        g.setSignature(sigAlg);
+        g.setIssuer(dn);
+        g.setSubject(dn);
+        g.setStartDate(new Time(notBefore));
+        g.setEndDate(new Time(notAfter));
+        g.setSubjectPublicKeyInfo(
+                SubjectPublicKeyInfo.getInstance(kp.getPublic().getEncoded()));
+
+        TBSCertificate tbs = g.generateTBSCertificate();
+
+        Signature s = Signature.getInstance("SHA256withRSA");
+        s.initSign(kp.getPrivate());
+        s.update(tbs.getEncoded(ASN1Encoding.DER));
+        byte[] sig = s.sign();
+
+        ASN1EncodableVector v = new ASN1EncodableVector();
+        v.add(tbs);
+        v.add(sigAlg);
+        v.add(new DERBitString(sig));
+        byte[] certDer = new DERSequence(v).getEncoded(ASN1Encoding.DER);
+
+        return CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(certDer));
+    }
+}
