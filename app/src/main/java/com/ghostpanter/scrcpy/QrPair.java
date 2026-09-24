@@ -13,23 +13,22 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 // Display a WIFI:T:ADB QR for the target to scan, discover the pairing
-// server over mDNS, run SPAKE2 pairing, then ask for the connect address.
+// server over mDNS, run SPAKE2 pairing, then auto-save when the connect
+// endpoint is discovered (or ask for the address).
 public final class QrPair extends Activity {
 
-    private static final String PAIRING_TYPE = "_adb-tls-pairing._tcp.";
-    private static final String CONNECT_TYPE = "_adb-tls-connect._tcp.";
     private static final int QR_SIZE_PX = 720;
     private static final int REQ_NEARBY = 42;
+    private static final long CONNECT_DISCOVER_MS = 12_000L;
 
     private QrCodes.Payload payload;
     private NsdManager nsd;
     private NsdManager.DiscoveryListener pairDiscovery;
-    private NsdManager.DiscoveryListener connectDiscovery;
     private final AtomicBoolean pairing = new AtomicBoolean(false);
+    private final AtomicBoolean saved = new AtomicBoolean(false);
     private volatile String pairedHost;
     private volatile int pairedConnectPort = -1;
 
@@ -40,8 +39,8 @@ public final class QrPair extends Activity {
     private Adb adb;
 
     @Override
-    protected void onCreate(Bundle saved) {
-        super.onCreate(saved);
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
         setContentView(R.layout.qr_pair);
         Ui.padForInsets(findViewById(R.id.root),
                 WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
@@ -59,6 +58,7 @@ public final class QrPair extends Activity {
         refresh.setOnClickListener(v -> {
             stopDiscovery();
             pairing.set(false);
+            saved.set(false);
             pairedHost = null;
             pairedConnectPort = -1;
             payload = QrCodes.generate();
@@ -73,16 +73,7 @@ public final class QrPair extends Activity {
                 Toast.makeText(this, R.string.bad_address, Toast.LENGTH_LONG).show();
                 return;
             }
-            try {
-                List<Devices.Device> updated = Devices.upsert(getApplicationContext(), target);
-                Toast.makeText(this, R.string.qr_paired, Toast.LENGTH_SHORT).show();
-                setResult(RESULT_OK);
-                finish();
-            } catch (Exception e) {
-                Log.e(e, "qr save failed");
-                Toast.makeText(this, getString(R.string.could_not_save_device, e.getMessage()),
-                        Toast.LENGTH_LONG).show();
-            }
+            persist(target, /*auto*/ false);
         });
 
         new Thread(() -> {
@@ -163,26 +154,8 @@ public final class QrPair extends Activity {
             }
             @Override public void onServiceLost(NsdServiceInfo info) {}
         };
-        connectDiscovery = new NsdManager.DiscoveryListener() {
-            @Override public void onStartDiscoveryFailed(String t, int e) {}
-            @Override public void onStopDiscoveryFailed(String t, int e) {}
-            @Override public void onDiscoveryStarted(String t) {}
-            @Override public void onDiscoveryStopped(String t) {}
-            @Override public void onServiceFound(NsdServiceInfo info) {
-                // Connect instance names are typically adb-<guid>. Capture any
-                // resolve after we know the paired host.
-                nsd.resolveService(info, new NsdManager.ResolveListener() {
-                    @Override public void onResolveFailed(NsdServiceInfo s, int errorCode) {}
-                    @Override public void onServiceResolved(NsdServiceInfo resolved) {
-                        onConnectServiceResolved(resolved);
-                    }
-                });
-            }
-            @Override public void onServiceLost(NsdServiceInfo info) {}
-        };
         try {
-            nsd.discoverServices(PAIRING_TYPE, NsdManager.PROTOCOL_DNS_SD, pairDiscovery);
-            nsd.discoverServices(CONNECT_TYPE, NsdManager.PROTOCOL_DNS_SD, connectDiscovery);
+            nsd.discoverServices(AdbDiscovery.PAIRING_TYPE, NsdManager.PROTOCOL_DNS_SD, pairDiscovery);
         } catch (Exception e) {
             Log.e(e, "nsd discover failed");
             status.setText(getString(R.string.qr_failed, e.getMessage()));
@@ -191,26 +164,40 @@ public final class QrPair extends Activity {
 
     private void onPairingServiceResolved(NsdServiceInfo info) {
         if (!pairing.compareAndSet(false, true)) return;
-        String host = hostOf(info);
-        int port = info.getPort();
-        if (host == null || port <= 0) {
+        AdbDiscovery.Endpoint ep = AdbDiscovery.endpointOf(info);
+        if (ep == null) {
             pairing.set(false);
             return;
         }
-        Log.i("qr pair target %s:%d", host, port);
+        Log.i("qr pair target %s:%d", ep.host, ep.port);
         runOnUiThread(() -> status.setText(R.string.pairing));
         new Thread(() -> {
             try {
-                adb.pairDevice(host, port, payload.password);
-                pairedHost = host;
-                Log.i("qr pair ok host=%s", host);
+                adb.pairDevice(ep.host, ep.port, payload.password);
+                pairedHost = ep.host;
+                Log.i("qr pair ok host=%s", ep.host);
+                // Prefer AdbDiscovery for the connect endpoint, then auto-save.
+                AdbDiscovery.Endpoint connect = AdbDiscovery.discoverConnect(
+                        getApplicationContext(), ep.host, CONNECT_DISCOVER_MS);
+                if (connect != null) {
+                    pairedConnectPort = connect.port;
+                    Devices.Device target = new Devices.Device(connect.host, connect.port);
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        addressField.setText(target.toString());
+                        saveButton.setEnabled(true);
+                        status.setText(R.string.qr_need_connect_address);
+                    });
+                    persist(target, /*auto*/ true);
+                    return;
+                }
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     status.setText(R.string.qr_need_connect_address);
                     if (pairedConnectPort > 0) {
-                        addressField.setText(host + ":" + pairedConnectPort);
+                        addressField.setText(ep.host + ":" + pairedConnectPort);
                     } else if (addressField.getText().length() == 0) {
-                        addressField.setText(host + ":");
+                        addressField.setText(ep.host + ":");
                     }
                     saveButton.setEnabled(true);
                     Toast.makeText(this, R.string.qr_paired, Toast.LENGTH_SHORT).show();
@@ -226,32 +213,32 @@ public final class QrPair extends Activity {
         }, "qr-pair").start();
     }
 
-    private void onConnectServiceResolved(NsdServiceInfo info) {
-        String host = hostOf(info);
-        int port = info.getPort();
-        if (host == null || port <= 0) return;
-        // Prefer the host we just paired with when known.
-        if (pairedHost != null && !pairedHost.equals(host)) return;
-        pairedConnectPort = port;
-        if (pairedHost != null) {
+    private void persist(Devices.Device target, boolean auto) {
+        if (auto) {
+            if (!saved.compareAndSet(false, true)) return;
+        } else {
+            saved.set(true);
+        }
+        try {
+            Devices.upsert(getApplicationContext(), target);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                addressField.setText(pairedHost + ":" + port);
+                Toast.makeText(this,
+                        auto ? R.string.qr_autosaved : R.string.qr_paired,
+                        Toast.LENGTH_SHORT).show();
+                setResult(RESULT_OK);
+                finish();
+            });
+        } catch (Exception e) {
+            saved.set(false);
+            Log.e(e, "qr save failed");
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
                 saveButton.setEnabled(true);
+                Toast.makeText(this, getString(R.string.could_not_save_device, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
             });
         }
-    }
-
-    @SuppressWarnings("deprecation")
-    private static String hostOf(NsdServiceInfo info) {
-        if (Build.VERSION.SDK_INT >= 34) {
-            var addrs = info.getHostAddresses();
-            if (addrs != null && !addrs.isEmpty() && addrs.get(0) != null) {
-                return addrs.get(0).getHostAddress();
-            }
-        }
-        java.net.InetAddress host = info.getHost();
-        return host == null ? null : host.getHostAddress();
     }
 
     private void stopDiscovery() {
@@ -259,11 +246,7 @@ public final class QrPair extends Activity {
         try {
             if (pairDiscovery != null) nsd.stopServiceDiscovery(pairDiscovery);
         } catch (Exception ignored) {}
-        try {
-            if (connectDiscovery != null) nsd.stopServiceDiscovery(connectDiscovery);
-        } catch (Exception ignored) {}
         pairDiscovery = null;
-        connectDiscovery = null;
     }
 
     @Override

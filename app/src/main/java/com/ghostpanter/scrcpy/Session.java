@@ -6,7 +6,10 @@ import android.view.MotionEvent;
 import android.view.Surface;
 
 import java.io.IOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -70,11 +73,12 @@ public final class Session {
     private static final long HEALTHY_MS = 120_000L;
 
     private static final long BRING_UP_DEADLINE_MS = 90_000L;
+    private static final long REDISCOVER_MS = 15_000L;
     private static final long STOP_JOIN_MS = 10_000L;
 
     private final Context        ctx;
     private final Adb            adb;
-    private final Devices.Device target;
+    private volatile Devices.Device target;
     private volatile Surface     surface;
     private final Listener       listener;
 
@@ -120,6 +124,11 @@ public final class Session {
         if (runner != null || stopped) return;
         runner = new Thread(this::run, "session");
         runner.start();
+    }
+
+    // Current endpoint (may change after rediscovery / fixed-port lock).
+    public Devices.Device getTarget() {
+        return target;
     }
 
     public boolean stop() {
@@ -349,10 +358,47 @@ public final class Session {
     }
 
     private void bringUpAttempt() throws Exception {
-        Log.i("session: connect %s:%d", target.host, target.port);
+        Devices.Device endpoint = target;
+        Log.i("session: connect %s:%d", endpoint.host, endpoint.port);
         adb.disconnect();
-        adb.connect(target.host, target.port);
-        Log.i("adb connect ok");
+        try {
+            adb.connect(endpoint.host, endpoint.port);
+        } catch (Exception connectErr) {
+            if (!shouldRediscover(endpoint, connectErr)) throw connectErr;
+            Log.w("session: connect %s failed (%s) — rediscovering wireless-debug port",
+                    endpoint, connectErr);
+            AdbDiscovery.Endpoint ep = AdbDiscovery.discoverConnectForHost(
+                    ctx, endpoint.host, REDISCOVER_MS);
+            if (ep == null) {
+                IOException none = new IOException(
+                        ctx.getString(R.string.wireless_debug_port_none));
+                none.addSuppressed(connectErr);
+                throw none;
+            }
+            Devices.Device discovered = new Devices.Device(ep.host, ep.port);
+            Log.i("session: rediscovered %s — connecting", discovered);
+            adb.connect(discovered.host, discovered.port);
+            try {
+                Devices.upsertHost(ctx.getApplicationContext(), discovered);
+            } catch (Exception saveErr) {
+                Log.e(saveErr, "session: failed to save rediscovered endpoint");
+            }
+            endpoint = discovered;
+            target = discovered;
+        }
+        Log.i("adb connect ok at %s", endpoint);
+
+        // Switch ephemeral wireless-debug port to a stable tcpip port when enabled.
+        // Best-effort: lock failure must not rewrite the caller to a dead fixed port.
+        try {
+            endpoint = FixedAdbPort.applyIfNeeded(ctx, adb, endpoint);
+        } catch (Exception lockErr) {
+            Log.w("session: fixed-port lock failed (keeping %s): %s", endpoint, lockErr);
+        }
+        if (endpoint != target) {
+            target = endpoint;
+            Log.i("session: using endpoint %s", endpoint);
+        }
 
         Server srv = null;
         ControlStream cs = null;
@@ -430,6 +476,41 @@ public final class Session {
         long version = ++geometryVersion;
         ctrl.setTargetSize(version, w, h);
         if (listener != null) listener.onConnected(version, w, h);
+    }
+
+
+    // After reboot, saved fixed tcpip ports are often dead while wireless
+    // debugging advertises a new ephemeral _adb-tls-connect port.
+    private boolean shouldRediscover(Devices.Device endpoint, Exception err) {
+        if (endpoint == null || err == null) return false;
+        boolean onFixed = Settings.fixedAdbPortEnabled(ctx)
+                && endpoint.port == Settings.fixedAdbPort(ctx);
+        if (onFixed) return true;
+        if (err instanceof ConnectException
+                || err instanceof SocketTimeoutException
+                || err instanceof NoRouteToHostException) {
+            return true;
+        }
+        for (Throwable c = err; c != null; c = c.getCause()) {
+            if (c instanceof ConnectException
+                    || c instanceof SocketTimeoutException
+                    || c instanceof NoRouteToHostException) {
+                return true;
+            }
+            String m = c.getMessage();
+            if (m == null) continue;
+            String lower = m.toLowerCase(Locale.ROOT);
+            if (lower.contains("connection refused")
+                    || lower.contains("econnrefused")
+                    || lower.contains("timed out")
+                    || lower.contains("timeout")
+                    || lower.contains("no route")
+                    || lower.contains("enetunreach")
+                    || lower.contains("network is unreachable")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private synchronized void tearDownInstalled() {

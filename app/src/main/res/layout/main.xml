@@ -56,10 +56,7 @@
 
         </LinearLayout>
 
-        <!-- Pairing form. Each field is one value the target already
-             prints, copied verbatim: the Wireless debugging screen shows
-             the device address as a single "ip:port" string, and the
-             pairing dialog adds its own port plus the code. -->
+        <!-- Pair-first form: pairing dialog address + code, optional connect. -->
         <LinearLayout
             style="@style/Card"
             android:layout_width="match_parent"
@@ -81,21 +78,21 @@
                 style="@style/FieldLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/label_address"/>
+                android:text="@string/label_pair_address"/>
 
             <TextView
                 style="@style/Caption"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/sub_address"/>
+                android:text="@string/sub_pair_address"/>
 
             <EditText
-                android:id="@+id/device_address"
+                android:id="@+id/pair_address"
                 style="@style/Field"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/space_xs"
-                android:hint="@string/address_hint"
+                android:hint="@string/pair_address_hint"
                 android:inputType="textUri"
                 android:importantForAutofill="no"/>
 
@@ -103,43 +100,69 @@
                 style="@style/FieldLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/label_pairing"/>
+                android:text="@string/label_pair_code"/>
 
             <TextView
                 style="@style/Caption"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/sub_pairing"/>
+                android:text="@string/sub_pair_code"/>
 
-            <LinearLayout
+            <EditText
+                android:id="@+id/pair_code"
+                style="@style/Field"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="@dimen/space_xs">
+                android:layout_marginTop="@dimen/space_xs"
+                android:hint="@string/pair_code_hint"
+                android:inputType="numberPassword"
+                android:maxLength="6"
+                android:importantForAutofill="no"/>
 
-                <EditText
-                    android:id="@+id/pair_port"
-                    style="@style/Field"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginEnd="@dimen/space_sm"
-                    android:hint="@string/pair_port_hint"
-                    android:inputType="number"
-                    android:importantForAutofill="no"/>
+            <!-- Legacy: only needed when 配对地址 is IP-only without :port. -->
+            <TextView
+                style="@style/FieldLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/label_pair_port_legacy"/>
 
-                <EditText
-                    android:id="@+id/pair_code"
-                    style="@style/Field"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:hint="@string/pair_code_hint"
-                    android:inputType="numberPassword"
-                    android:maxLength="6"
-                    android:importantForAutofill="no"/>
+            <TextView
+                style="@style/Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/sub_pair_port_legacy"/>
 
-            </LinearLayout>
+            <EditText
+                android:id="@+id/pair_port"
+                style="@style/Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:hint="@string/pair_port_hint"
+                android:inputType="number"
+                android:importantForAutofill="no"/>
+
+            <TextView
+                style="@style/FieldLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/label_connect_address"/>
+
+            <TextView
+                style="@style/Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/sub_connect_address"/>
+
+            <EditText
+                android:id="@+id/connect_address"
+                style="@style/Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:hint="@string/connect_address_hint"
+                android:inputType="textUri"
+                android:importantForAutofill="no"/>
 
             <TextView
                 style="@style/Caption"
@@ -157,12 +180,71 @@
                 android:text="@string/pair_and_save"/>
 
             <Button
+                android:id="@+id/discover_pairing"
+                style="@style/Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_sm"
+                android:text="@string/discover_pairing"/>
+
+            <Button
                 android:id="@+id/pair_qr"
                 style="@style/Button.Secondary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/space_sm"
                 android:text="@string/pair_with_qr"/>
+
+        </LinearLayout>
+
+        <!-- Reconnect after reboot: IP-only mDNS rediscovery of connect port. -->
+        <LinearLayout
+            style="@style/Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/space_lg">
+
+            <TextView
+                style="@style/SectionHeader"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/reconnect_after_reboot"/>
+
+            <TextView
+                style="@style/Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/reconnect_by_ip_help"/>
+
+            <TextView
+                style="@style/FieldLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/label_reconnect_ip"/>
+
+            <TextView
+                style="@style/Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/sub_reconnect_ip"/>
+
+            <EditText
+                android:id="@+id/reconnect_ip"
+                style="@style/Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:hint="@string/reconnect_ip_hint"
+                android:inputType="textUri"
+                android:importantForAutofill="no"/>
+
+            <Button
+                android:id="@+id/reconnect_by_ip"
+                style="@style/Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_lg"
+                android:text="@string/reconnect_by_ip"/>
 
         </LinearLayout>
 

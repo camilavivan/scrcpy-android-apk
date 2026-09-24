@@ -17,8 +17,8 @@ android {
         applicationId 'com.ghostpanter.scrcpy'
         minSdk 31
         targetSdk 37
-        versionCode 7
-        versionName '0.5.1-ghostpanter'
+        versionCode 13
+        versionName '0.5.7-ghostpanter'
     }
 
     // AGP otherwise embeds a Google-signed dependency-metadata blob in the
@@ -119,6 +119,14 @@ android {
 
     sourceSets {
         main.assets.srcDir '../vendor/libadb-android/LICENSES'
+    }
+
+    // Name APK after root project (scrcpy-android), not "app-debug.apk".
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            def vName = variant.versionName ?: "dev"
+            output.outputFileName = "${rootProject.name}-${vName}-${variant.buildType.name}.apk"
+        }
     }
 }
 

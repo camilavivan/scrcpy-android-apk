@@ -190,6 +190,16 @@ public final class Devices {
         return list;
     }
 
+    // Add or replace every saved row for the same host (any port). Used when
+    // switching a target from an ephemeral wireless-debug port to a fixed one.
+    public static synchronized List<Device> upsertHost(Context ctx, Device d) throws IOException {
+        List<Device> list = load(ctx);
+        list.removeIf(x -> x.host.equals(d.host));
+        list.add(d);
+        save(ctx, list);
+        return list;
+    }
+
     // Remove the matching device (by host+port). Returns the updated list.
     public static synchronized List<Device> remove(Context ctx, Device d) throws IOException {
         List<Device> list = load(ctx);

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">scrcpy (Ghostpanter)</string>
+    <string name="app_name">scrcpy-android</string>
     <string name="address_hint">192.168.1.42:41234</string>
-    <string name="pair_port_hint">37123</string>
+    <string name="pair_port_hint">pairing port (if IP only)</string>
     <string name="pair_code_hint">6 digits</string>
-    <string name="pair_help">On the target: Settings &gt; Developer options &gt; Wireless debugging</string>
+    <string name="pair_help">Pair first, then connect: on the target open “Pair device with pairing code”, copy IP:pairing-port and the 6-digit code. Connect port may be left empty and auto-discovered after pairing.</string>
     <string name="label_address">Device address</string>
     <string name="sub_address">The “IP address &amp; Port” on the Wireless debugging screen</string>
     <string name="label_pairing">Pairing port and code</string>
@@ -34,14 +34,15 @@
     <string name="max_size">Max size (long edge, px)</string>
     <string name="max_size_original">Original</string>
     <string name="max_size_480">480</string>
-    <string name="max_size_720">720</string>
-    <string name="max_size_1080">1080 (default)</string>
+    <string name="max_size_720">720 (default)</string>
+    <string name="max_size_1080">1080</string>
     <string name="max_size_1440">1440</string>
     <string name="max_size_2160">2160</string>
     <string name="video_bit_rate">Video bit rate</string>
     <string name="bit_rate_1m">1 Mbps</string>
     <string name="bit_rate_2m">2 Mbps</string>
-    <string name="bit_rate_4m">4 Mbps (default)</string>
+    <string name="bit_rate_4m">4 Mbps</string>
+    <string name="bit_rate_6m">6 Mbps (default)</string>
     <string name="bit_rate_8m">8 Mbps</string>
     <string name="bit_rate_16m">16 Mbps</string>
     <string name="reconnect">Reconnect</string>
@@ -54,7 +55,7 @@
     <string name="settings_apply_on_reconnect">Changes apply on the next connection.</string>
     <string name="display">Display</string>
     <string name="clipboard_sync">Sync clipboard with the target</string>
-    <string name="no_devices_yet">No devices paired yet - fill the fields above and tap Pair.</string>
+    <string name="no_devices_yet">No devices paired yet — fill pairing address and code, then tap Pair and save.</string>
 
     <string name="latency">Latency</string>
     <string name="max_fps">Max FPS</string>
@@ -70,7 +71,7 @@
     <string name="qr_status_ready">Show this QR on the target</string>
     <string name="qr_paired">Paired via QR</string>
     <string name="qr_failed">QR pairing failed: %1$s</string>
-    <string name="qr_need_connect_address">Paired. Enter the Wireless debugging IP:port below and tap Save.</string>
+    <string name="qr_need_connect_address">Paired. Waiting for connect port discovery, or enter Wireless debugging IP:port below and tap Save.</string>
     <string name="qr_save_address">Save connect address</string>
     <string name="qr_refresh">New QR code</string>
     <string name="qr_permission_nearby">Nearby Wi-Fi devices permission is needed for QR pairing discovery.</string>
@@ -82,4 +83,65 @@
     <string name="could_not_save_device">could not save device: %1$s</string>
     <string name="nsd_unavailable">NSD unavailable</string>
     <string name="error_unknown">unknown</string>
+
+    <string name="label_pair_address">Pairing address</string>
+    <string name="sub_pair_address">IP:pairing-port from the “Pair device with pairing code” dialog</string>
+    <string name="pair_address_hint">192.168.31.25:40347</string>
+    <string name="bad_pair_address">Enter the pairing address as 192.168.31.25:40347 (IP:pairing port)</string>
+    <string name="label_pair_code">Pairing code</string>
+    <string name="sub_pair_code">The 6-digit code from the pairing dialog</string>
+    <string name="label_pair_port_legacy">Pairing port (optional)</string>
+    <string name="sub_pair_port_legacy">Only needed when the pairing address is IP-only (no port)</string>
+    <string name="label_connect_address">Connect address (optional)</string>
+    <string name="sub_connect_address">IP:connect-port from the Wireless debugging main screen; leave empty to auto-discover after pairing</string>
+    <string name="connect_address_hint">Leave empty to auto-discover after pairing</string>
+    <string name="bad_connect_address">Connect address must be IP:port, or leave empty to auto-discover</string>
+    <string name="discover_pairing">Discover pairing on LAN</string>
+    <string name="discovering_pairing">Scanning for pairing services…</string>
+    <string name="discover_pairing_title">Choose a pairing device</string>
+    <string name="discover_pairing_none">No pairing devices found. Open “Pair device with pairing code” and stay on the same LAN.</string>
+    <string name="discover_pairing_filled">Pairing address filled</string>
+    <string name="discover_pairing_failed">LAN discovery failed: %1$s</string>
+    <string name="pair_ok_no_connect">Paired, but no connect port was found. Enter IP:port from the Wireless debugging main screen.</string>
+    <string name="paired_saved_verify_failed">Paired and saved, but connect verify failed (possible network isolation). You can retry connecting later.</string>
+    <string name="qr_autosaved">Paired and connect address auto-saved</string>
+
+    <string name="fixed_adb_port_section">Fixed ADB port</string>
+    <string name="fixed_adb_port_enabled">Enable fixed ADB port (easier reconnect)</string>
+    <string name="fixed_adb_port_label">Port (1024–65535)</string>
+    <string name="fixed_adb_port_hint">9527</string>
+    <string name="fixed_adb_port_caption">After the first successful wireless-debug pair and connect, adbd is switched to this port and the saved device address is updated. After rebooting the phone you may need to run this once more.</string>
+    <string name="fixed_adb_port_invalid">Fixed ADB port must be a number from 1024 to 65535</string>
+
+    <string name="reconnect_after_reboot">Reconnect after reboot</string>
+    <string name="reconnect_by_ip_help">After the phone reboots, the wireless-debug port changes. Enter only the IP to rediscover the connect port on the LAN and reconnect (no pairing code).</string>
+    <string name="label_reconnect_ip">Device IP</string>
+    <string name="sub_reconnect_ip">IPv4 address on the same LAN as the target</string>
+    <string name="reconnect_ip_hint">192.168.31.25</string>
+    <string name="reconnect_by_ip">One-tap reconnect (IP only)</string>
+    <string name="bad_reconnect_ip">Enter a valid IPv4 address, e.g. 192.168.31.25</string>
+    <string name="discovering_connect">Discovering wireless-debug connect port for this IP…</string>
+    <string name="reconnect_connect_none">No wireless-debug connect port found for this IP. Confirm Wireless debugging is on and both devices are on the same LAN.</string>
+    <string name="reconnect_ok">Reconnected and saved %1$s</string>
+    <string name="reconnect_failed">Reconnect failed: %1$s</string>
+    <string name="rediscover_port">Rediscover port by IP</string>
+    <string name="device_actions_title">Device actions</string>
+
+    <string name="fixed_adb_port_locked">Port locked to %1$d — you can reconnect directly later</string>
+    <string name="reconnect_temp_port_lock_failed">Reconnected on a temporary port; fixed-port lock failed (common after reboot). Try locking again later.</string>
+    <string name="wireless_debug_port_none">No wireless-debug port found. Re-enable Wireless debugging on the target device.</string>
+    <string name="streaming_presets">Streaming presets</string>
+    <string name="streaming_presets_caption">Smooth: 720p / 6Mbps / 60fps / H.264, low latency. Quality: 1080p / 8Mbps / 60fps / H.264, low latency. Applied immediately; takes effect on the next connection.</string>
+    <string name="preset_smooth">Smooth</string>
+    <string name="preset_quality">Quality</string>
+    <string name="preset_smooth_toast">Switched to Smooth mode — applies on next connection</string>
+    <string name="preset_quality_toast">Switched to Quality mode — applies on next connection</string>
+
+    <string name="donate">Donate</string>
+    <string name="donate_help">Long-press a QR code to save it to Photos, then scan with WeChat or Alipay. Thank you!</string>
+    <string name="donate_wechat">WeChat Pay</string>
+    <string name="donate_alipay">Alipay</string>
+    <string name="donate_saved">Saved to Photos</string>
+    <string name="donate_save_failed">Could not save: %1$s</string>
+
 </resources>

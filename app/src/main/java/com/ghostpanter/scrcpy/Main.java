@@ -3,6 +3,8 @@ package com.ghostpanter.scrcpy;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.View;
@@ -16,20 +18,37 @@ import android.widget.Toast;
 import java.io.IOException;
 import java.util.List;
 
-// Pairing form + saved-device list.
+// Pairing form + saved-device list + IP-only reconnect after reboot.
 //
-// Layout: device address ("ip:port"), pair-port, pair-code + a single
-// "Pair and save" button. The address is the connect endpoint printed on
-// the target's Wireless debugging screen; pairing happens on a different,
-// short-lived port from the pairing dialog, against the same host. After a
-// successful pair() against the daemon, the row is appended to devices.json
-// with the *connect* port. Tapping a saved row launches the Mirror activity.
+// Flow: pair first (pairing-dialog IP:port + 6-digit code), then resolve the
+// Wireless debugging *connect* endpoint (user-supplied or mDNS
+// _adb-tls-connect._tcp for that host) and save that. LAN discovery can fill
+// the pairing address from _adb-tls-pairing._tcp.
+//
+// After reboot the connect port is ephemeral again: 「一键重连（仅 IP）」
+// rediscovers _adb-tls-connect._tcp for the entered IPv4 (no pairing code).
 public final class Main extends Activity {
+
+    private static final int REQ_NEARBY_PAIR = 43;
+    private static final int REQ_NEARBY_DISCOVER = 44;
+    private static final int REQ_NEARBY_RECONNECT = 45;
+    private static final long CONNECT_DISCOVER_MS = 12_000L;
+    private static final long PAIRING_DISCOVER_MS = 8_000L;
+    private static final long RECONNECT_DISCOVER_MS = 15_000L;
 
     private volatile Adb adb;
     private LinearLayout deviceList;
     private TextView     devicesEmpty;
     private Button       pairButton;
+    private Button       discoverPairButton;
+    private Button       reconnectByIpButton;
+    private EditText     pairAddress;
+    private EditText     pairPort;
+    private EditText     pairCode;
+    private EditText     connectAddress;
+    private EditText     reconnectIp;
+    private Runnable     pendingAfterNearby;
+    private boolean      openMirrorAfterReconnect = true;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -43,10 +62,14 @@ public final class Main extends Activity {
         Ui.padForInsets(findViewById(R.id.root),
                 WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
 
-        EditText address     = findViewById(R.id.device_address);
-        EditText pairPort    = findViewById(R.id.pair_port);
-        EditText pairCode    = findViewById(R.id.pair_code);
+        pairAddress          = findViewById(R.id.pair_address);
+        pairPort             = findViewById(R.id.pair_port);
+        pairCode             = findViewById(R.id.pair_code);
+        connectAddress       = findViewById(R.id.connect_address);
+        reconnectIp          = findViewById(R.id.reconnect_ip);
         pairButton           = findViewById(R.id.pair);
+        discoverPairButton   = findViewById(R.id.discover_pairing);
+        reconnectByIpButton  = findViewById(R.id.reconnect_by_ip);
         View settingsBtn     = findViewById(R.id.settings);
         deviceList  = findViewById(R.id.devices);
         devicesEmpty = findViewById(R.id.devices_empty);
@@ -57,7 +80,9 @@ public final class Main extends Activity {
                 startActivity(new Intent(this, QrPair.class)));
 
         try {
-            showDevices(Devices.load(this));
+            List<Devices.Device> loaded = Devices.load(this);
+            showDevices(loaded);
+            prefillReconnectIp(loaded);
         } catch (IOException e) {
             Log.e(e, "devices: load failed");
             showDevices(java.util.Collections.emptyList());
@@ -66,6 +91,8 @@ public final class Main extends Activity {
 
         // RSA keygen on first launch can take 1-3 s; never on the UI thread.
         pairButton.setEnabled(false);
+        discoverPairButton.setEnabled(false);
+        reconnectByIpButton.setEnabled(false);
         new Thread(() -> {
             try {
                 Adb a = Adb.getInstance(getApplicationContext());
@@ -73,6 +100,8 @@ public final class Main extends Activity {
                     if (isFinishing() || isDestroyed()) return;
                     adb = a;
                     pairButton.setEnabled(true);
+                    discoverPairButton.setEnabled(true);
+                    reconnectByIpButton.setEnabled(true);
                 });
             } catch (Exception e) {
                 Log.e(e, "adb init failed");
@@ -86,28 +115,309 @@ public final class Main extends Activity {
         }, "adb-init").start();
 
         pairButton.setOnClickListener(v -> {
-            if (adb == null) return; // still initialising
-            // The saved endpoint is the address field verbatim; pairing
-            // reuses its host with the pairing port.
-            Devices.Device target = Devices.parseAddress(address.getText().toString());
-            if (target == null) {
-                Toast.makeText(this, R.string.bad_address, Toast.LENGTH_LONG).show();
-                return;
+            if (adb == null) return;
+            ParsedPairing parsed = parsePairingFields();
+            if (parsed == null) return;
+            String connectRaw = connectAddress.getText().toString().trim();
+            Devices.Device explicitConnect = null;
+            if (!TextUtils.isEmpty(connectRaw)) {
+                explicitConnect = Devices.parseAddress(connectRaw);
+                if (explicitConnect == null) {
+                    Toast.makeText(this, R.string.bad_connect_address, Toast.LENGTH_LONG).show();
+                    return;
+                }
             }
-            int pairP = Devices.parsePort(pairPort.getText().toString());
+            Devices.Device explicit = explicitConnect;
+            setBusy(true);
+            ensureNearby(() -> {
+                        Toast.makeText(this, R.string.pairing, Toast.LENGTH_SHORT).show();
+                        new Thread(
+                                () -> pairAndSave(parsed.host, parsed.pairPort, parsed.code, explicit),
+                                "pair").start();
+                    },
+                    REQ_NEARBY_PAIR);
+        });
+
+        discoverPairButton.setOnClickListener(v -> {
+            if (adb == null) return;
+            setBusy(true);
+            ensureNearby(() -> {
+                        Toast.makeText(this, R.string.discovering_pairing, Toast.LENGTH_SHORT).show();
+                        new Thread(this::discoverPairingAndChoose, "discover-pair").start();
+                    },
+                    REQ_NEARBY_DISCOVER);
+        });
+
+        reconnectByIpButton.setOnClickListener(v -> {
+            if (adb == null) return;
+            String ip = parseReconnectIpField();
+            if (ip == null) return;
+            startReconnectByIp(ip, openMirrorAfterReconnect);
+        });
+    }
+
+    private void prefillReconnectIp(List<Devices.Device> devices) {
+        if (devices == null || devices.isEmpty()) return;
+        // Prefer the last list entry (most recently upserted).
+        Devices.Device last = devices.get(devices.size() - 1);
+        String host = last.host;
+        if (AdbDiscovery.isIpv4(host)) {
+            reconnectIp.setText(AdbDiscovery.normalizeIpv4(host.trim()));
+        } else if (looksLikeHostOnly(host)) {
+            reconnectIp.setText(host);
+        }
+    }
+
+    private String parseReconnectIpField() {
+        String raw = reconnectIp.getText().toString().trim();
+        String norm = AdbDiscovery.normalizeIpv4(raw);
+        if (norm == null) {
+            Toast.makeText(this, R.string.bad_reconnect_ip, Toast.LENGTH_LONG).show();
+            return null;
+        }
+        return norm;
+    }
+
+    private void startReconnectByIp(String ip, boolean openMirror) {
+        setBusy(true);
+        ensureNearby(() -> {
+                    Toast.makeText(this, R.string.discovering_connect, Toast.LENGTH_SHORT).show();
+                    new Thread(() -> reconnectByIp(ip, openMirror), "reconnect-ip").start();
+                },
+                REQ_NEARBY_RECONNECT);
+    }
+
+    private static final class ParsedPairing {
+        final String host;
+        final int pairPort;
+        final String code;
+        ParsedPairing(String host, int pairPort, String code) {
+            this.host = host;
+            this.pairPort = pairPort;
+            this.code = code;
+        }
+    }
+
+    // Accept "ip:pairPort" in the primary field, or legacy IP-only + pair_port.
+    private ParsedPairing parsePairingFields() {
+        String raw = pairAddress.getText().toString().trim();
+        if (TextUtils.isEmpty(raw)) {
+            Toast.makeText(this, R.string.bad_pair_address, Toast.LENGTH_LONG).show();
+            return null;
+        }
+        String host;
+        int pairP;
+        Devices.Device asEndpoint = Devices.parseAddress(raw);
+        if (asEndpoint != null) {
+            host = asEndpoint.host;
+            pairP = asEndpoint.port;
+        } else if (looksLikeHostOnly(raw)) {
+            // Host-only: require the legacy pair_port field.
+            host = raw;
+            pairP = Devices.parsePort(pairPort.getText().toString());
             if (pairP < 0) {
                 Toast.makeText(this, R.string.bad_pair_port, Toast.LENGTH_LONG).show();
+                return null;
+            }
+        } else {
+            Toast.makeText(this, R.string.bad_pair_address, Toast.LENGTH_LONG).show();
+            return null;
+        }
+        String pc = pairCode.getText().toString().trim();
+        if (TextUtils.isEmpty(pc) || !pc.matches("[0-9]{6}")) {
+            Toast.makeText(this, R.string.bad_pair_code, Toast.LENGTH_LONG).show();
+            return null;
+        }
+        return new ParsedPairing(host, pairP, pc);
+    }
+
+    private static boolean looksLikeHostOnly(String s) {
+        if (s == null || s.isEmpty() || s.length() > 255) return false;
+        if (s.indexOf(':') >= 0) return false; // unbracketed IPv6 not accepted here
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isWhitespace(c) || Character.isISOControl(c) || c == '[' || c == ']') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void ensureNearby(Runnable next, int requestCode) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+                    != PackageManager.PERMISSION_GRANTED) {
+                pendingAfterNearby = next;
+                requestPermissions(
+                        new String[]{android.Manifest.permission.NEARBY_WIFI_DEVICES},
+                        requestCode);
+                Toast.makeText(this, R.string.qr_permission_nearby, Toast.LENGTH_LONG).show();
+                // Keep buttons disabled until permission result re-enables or proceeds.
                 return;
             }
-            String pc = pairCode.getText().toString().trim();
-            if (TextUtils.isEmpty(pc) || !pc.matches("[0-9]{6}")) {
-                Toast.makeText(this, R.string.bad_pair_code, Toast.LENGTH_LONG).show();
+        }
+        next.run();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
+        if (requestCode == REQ_NEARBY_PAIR
+                || requestCode == REQ_NEARBY_DISCOVER
+                || requestCode == REQ_NEARBY_RECONNECT) {
+            boolean ok = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED;
+            Runnable pending = pendingAfterNearby;
+            pendingAfterNearby = null;
+            if (ok && pending != null) {
+                pending.run();
+            } else {
+                Toast.makeText(this, R.string.qr_permission_nearby, Toast.LENGTH_LONG).show();
+                reenableButtons();
+            }
+        }
+    }
+
+    private void setBusy(boolean busy) {
+        if (isFinishing() || isDestroyed()) return;
+        boolean enable = !busy && adb != null;
+        pairButton.setEnabled(enable);
+        discoverPairButton.setEnabled(enable);
+        reconnectByIpButton.setEnabled(enable);
+    }
+
+    private void reenableButtons() {
+        setBusy(false);
+    }
+
+    private void discoverPairingAndChoose() {
+        try {
+            List<AdbDiscovery.Endpoint> found =
+                    AdbDiscovery.discoverPairing(getApplicationContext(), PAIRING_DISCOVER_MS);
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                reenableButtons();
+                if (found.isEmpty()) {
+                    Toast.makeText(this, R.string.discover_pairing_none, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (found.size() == 1) {
+                    applyPairingEndpoint(found.get(0));
+                    Toast.makeText(this, R.string.discover_pairing_filled, Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                CharSequence[] labels = new CharSequence[found.size()];
+                for (int i = 0; i < found.size(); i++) {
+                    labels[i] = found.get(i).toString();
+                }
+                new AlertDialog.Builder(this)
+                        .setTitle(R.string.discover_pairing_title)
+                        .setItems(labels, (d, which) -> {
+                            applyPairingEndpoint(found.get(which));
+                            Toast.makeText(this, R.string.discover_pairing_filled,
+                                    Toast.LENGTH_SHORT).show();
+                        })
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show();
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                reenableButtons();
+                Toast.makeText(this, R.string.discover_pairing_none, Toast.LENGTH_LONG).show();
+            });
+        } catch (Exception e) {
+            Log.e(e, "discover pairing failed");
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                reenableButtons();
+                Toast.makeText(this, getString(R.string.discover_pairing_failed, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+            });
+        }
+    }
+
+    private void applyPairingEndpoint(AdbDiscovery.Endpoint ep) {
+        String addr = ep.host.indexOf(':') < 0
+                ? ep.host + ":" + ep.port
+                : "[" + ep.host + "]:" + ep.port;
+        pairAddress.setText(addr);
+        pairPort.setText(String.valueOf(ep.port));
+    }
+
+    // Rediscover connect port for an already-paired host (IP only), connect,
+    // optionally re-lock fixed tcpip port, upsert, toast, optionally open Mirror.
+    private void reconnectByIp(String ip, boolean openMirror) {
+        try {
+            Log.i("reconnect-by-ip: discover connect for %s", ip);
+            AdbDiscovery.Endpoint ep = AdbDiscovery.discoverConnectForHost(
+                    getApplicationContext(), ip, RECONNECT_DISCOVER_MS);
+            if (ep == null) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    Toast.makeText(this, R.string.reconnect_connect_none, Toast.LENGTH_LONG).show();
+                    reenableButtons();
+                });
                 return;
             }
-            pairButton.setEnabled(false);
-            Toast.makeText(this, R.string.pairing, Toast.LENGTH_SHORT).show();
-            new Thread(() -> pairAndSave(target, pairP, pc, pairButton), "pair").start();
-        });
+
+            Devices.Device connect = new Devices.Device(ep.host, ep.port);
+            Log.i("reconnect-by-ip: connect %s", connect);
+            adb.connect(connect.host, connect.port);
+            boolean wantedLock = Settings.fixedAdbPortEnabled(getApplicationContext())
+                    && connect.port != Settings.fixedAdbPort(getApplicationContext());
+            try {
+                connect = FixedAdbPort.applyIfNeeded(getApplicationContext(), adb, connect);
+            } catch (Exception lockErr) {
+                // Keep the working discovered TLS endpoint — never rewrite to a dead fixed port.
+                Log.w("reconnect-by-ip: fixed-port lock failed (keeping %s): %s",
+                        connect, lockErr);
+            }
+            boolean lockFailed = wantedLock
+                    && connect.port != Settings.fixedAdbPort(getApplicationContext());
+            try { adb.disconnect(); } catch (Exception ignored) {}
+
+            List<Devices.Device> updated = Devices.upsertHost(getApplicationContext(), connect);
+            Devices.Device saved = connect;
+            boolean showLockFail = lockFailed;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                showDevices(updated);
+                reconnectIp.setText(AdbDiscovery.isIpv4(saved.host)
+                        ? AdbDiscovery.normalizeIpv4(saved.host)
+                        : saved.host);
+                if (showLockFail) {
+                    Toast.makeText(this, R.string.reconnect_temp_port_lock_failed,
+                            Toast.LENGTH_LONG).show();
+                } else {
+                    Toast.makeText(this, getString(R.string.reconnect_ok, saved.toString()),
+                            Toast.LENGTH_SHORT).show();
+                }
+                reenableButtons();
+                if (openMirror) {
+                    Intent i = new Intent(this, Mirror.class);
+                    i.putExtra(Mirror.EXTRA_HOST, saved.host);
+                    i.putExtra(Mirror.EXTRA_PORT, saved.port);
+                    startActivity(i);
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            try { adb.disconnect(); } catch (Exception ignored) {}
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                Toast.makeText(this, R.string.reconnect_connect_none, Toast.LENGTH_LONG).show();
+                reenableButtons();
+            });
+        } catch (Exception e) {
+            Log.e(e, "reconnect-by-ip failed");
+            try { adb.disconnect(); } catch (Exception ignored) {}
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                Toast.makeText(this, getString(R.string.reconnect_failed, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+                reenableButtons();
+            });
+        }
     }
 
     // Rebuild the saved-device rows. There is no adapter: the whole page
@@ -126,9 +436,47 @@ public final class Main extends Activity {
                 i.putExtra(Mirror.EXTRA_PORT, d.port);
                 startActivity(i);
             });
-            row.setOnLongClickListener(v -> { confirmForget(d); return true; });
+            row.setOnLongClickListener(v -> {
+                showDeviceActions(d);
+                return true;
+            });
             deviceList.addView(row);
         }
+    }
+
+    private void showDeviceActions(Devices.Device d) {
+        CharSequence[] items = new CharSequence[] {
+                getString(R.string.rediscover_port),
+                getString(R.string.forget_device),
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.device_actions_title)
+                .setItems(items, (dlg, which) -> {
+                    if (which == 0) {
+                        rediscoverPortForDevice(d);
+                    } else if (which == 1) {
+                        confirmForget(d);
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void rediscoverPortForDevice(Devices.Device d) {
+        if (adb == null) return;
+        String host = d.host;
+        String ip = AdbDiscovery.normalizeIpv4(host);
+        if (ip == null) {
+            // Still allow hostname / non-normalized: discovery hostsMatch can resolve.
+            if (!looksLikeHostOnly(host)) {
+                Toast.makeText(this, R.string.bad_reconnect_ip, Toast.LENGTH_LONG).show();
+                return;
+            }
+            ip = host;
+        }
+        reconnectIp.setText(ip);
+        // From a saved row: rediscover + save, then offer mirror via auto-open.
+        startReconnectByIp(ip, openMirrorAfterReconnect);
     }
 
     private void confirmForget(Devices.Device d) {
@@ -149,24 +497,76 @@ public final class Main extends Activity {
                 .show();
     }
 
-    private void pairAndSave(Devices.Device target, int pairPort, String code, Button btn) {
+    private void pairAndSave(String host, int pairPort, String code,
+                             Devices.Device explicitConnect) {
         try {
-            Log.i("pair: %s:%d", target.host, pairPort);
-            adb.pairDevice(target.host, pairPort, code);
-            Log.i("pair ok host=%s pair_port=%d", target.host, pairPort);
-            List<Devices.Device> updated = Devices.upsert(getApplicationContext(), target);
+            Log.i("pair: %s:%d", host, pairPort);
+            adb.pairDevice(host, pairPort, code);
+            Log.i("pair ok host=%s pair_port=%d", host, pairPort);
+
+            Devices.Device connect = explicitConnect;
+            if (connect == null) {
+                Log.i("pair: discovering connect endpoint for %s", host);
+                AdbDiscovery.Endpoint ep = AdbDiscovery.discoverConnect(
+                        getApplicationContext(), host, CONNECT_DISCOVER_MS);
+                if (ep == null) {
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        Toast.makeText(this, R.string.pair_ok_no_connect, Toast.LENGTH_LONG).show();
+                        reenableButtons();
+                    });
+                    return;
+                }
+                connect = new Devices.Device(ep.host, ep.port);
+                Devices.Device fill = connect;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    connectAddress.setText(fill.toString());
+                });
+            }
+
+            boolean verified = false;
+            try {
+                Log.i("pair: probe connect %s", connect);
+                adb.connect(connect.host, connect.port);
+                verified = true;
+                Log.i("pair: probe connect ok");
+                // Lock to fixed ADB port while the probe session is live (best-effort).
+                try {
+                    connect = FixedAdbPort.applyIfNeeded(getApplicationContext(), adb, connect);
+                } catch (Exception lockErr) {
+                    // Keep the verified connect endpoint — do not rewrite to a dead fixed port.
+                    Log.w("pair: fixed-port lock failed (keeping %s): %s", connect, lockErr);
+                }
+                try { adb.disconnect(); } catch (Exception ignored) {}
+            } catch (Exception probe) {
+                Log.w("pair: probe connect failed (still saving): %s", probe);
+                try { adb.disconnect(); } catch (Exception ignored) {}
+            }
+
+            List<Devices.Device> updated = Devices.upsertHost(getApplicationContext(), connect);
+            Devices.Device saved = connect;
+            boolean ok = verified;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 showDevices(updated);
-                Toast.makeText(this, R.string.paired_and_saved, Toast.LENGTH_SHORT).show();
-                btn.setEnabled(true);
+                if (AdbDiscovery.isIpv4(saved.host)) {
+                    reconnectIp.setText(AdbDiscovery.normalizeIpv4(saved.host));
+                }
+                if (ok) {
+                    Toast.makeText(this, R.string.paired_and_saved, Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, R.string.paired_saved_verify_failed, Toast.LENGTH_LONG).show();
+                }
+                reenableButtons();
             });
         } catch (Exception e) {
             Log.e(e, "pair failed");
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                Toast.makeText(this, getString(R.string.pair_failed, e.getMessage()), Toast.LENGTH_LONG).show();
-                btn.setEnabled(true);
+                Toast.makeText(this, getString(R.string.pair_failed, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+                reenableButtons();
             });
         }
     }

@@ -213,6 +213,39 @@ public final class Adb {
         return openDestination("sync:");
     }
 
+    // Ask adbd to listen on a fixed TCP port (standard "tcpip:<port>" service).
+    // adbd commonly drops the current transport afterward; that is expected.
+    // Caller must reconnect to host:port. Always closes the service stream.
+    public synchronized void enableTcpip(int port) throws Exception {
+        if (port < 1024 || port > 65535) {
+            throw new IllegalArgumentException("tcpip port must be 1024-65535");
+        }
+        AdbStream stream = null;
+        try {
+            stream = openDestination("tcpip:" + port);
+            try (java.io.InputStream in = stream.openInputStream()) {
+                byte[] buf = new byte[256];
+                // Drain any "restarting in TCP mode..." banner; EOF/IOError is fine.
+                while (true) {
+                    int n = in.read(buf);
+                    if (n < 0) break;
+                    if (n == 0) break;
+                }
+            } catch (IOException e) {
+                Log.w("adb: tcpip:%d stream ended: %s", port, e);
+            }
+        } finally {
+            if (stream != null) {
+                try { stream.close(); }
+                catch (IOException e) { Log.w("adb: tcpip stream close: %s", e); }
+            }
+            // Transport is often dead after tcpip:; clear so the next connect is clean.
+            try { disconnect(); }
+            catch (IOException e) { Log.w("adb: disconnect after tcpip: %s", e); }
+        }
+        Log.i("adb: enableTcpip(%d) issued", port);
+    }
+
     private AdbStream openDestination(String destination) throws IOException, InterruptedException {
         AdbConnection current = connection;
         if (current == null || !current.isConnectionEstablished()) {

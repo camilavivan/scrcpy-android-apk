@@ -1,6 +1,6 @@
 # Source mirror
 
-Full Ghostpanter scrcpy-android tree (Chinese UI build 0.5.1).
+Full Ghostpanter scrcpy-android tree (0.5.7-ghostpanter: rename + donate QR).
 
 Canonical intent: https://github.com/Ghostpanter/scrcpy-android  
 APK releases: see Releases on this repo.

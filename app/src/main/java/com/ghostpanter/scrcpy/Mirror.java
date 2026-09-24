@@ -66,6 +66,8 @@ public final class Mirror extends Activity {
     private int            connectedW, connectedH;
     private long           connectedGeometryVersion;
     private int            gestureBottomInset;
+    private int            systemTopInset;
+    private boolean        immersiveOk;
 
     private SurfaceView surfaceView;
 
@@ -81,7 +83,10 @@ public final class Mirror extends Activity {
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         setContentView(R.layout.mirror);
-        immersive();
+        // Start CONNECTING with system bars visible so the status pill can
+        // clear status/cutout. Immersive hide applies once CONNECTED.
+        prepareEdgeToEdge();
+        showSystemBarsForStatus();
         // Hold the source screen awake for as long as Mirror is in
         // front. Cleared automatically when the activity is destroyed.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -121,10 +126,18 @@ public final class Mirror extends Activity {
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             int bottom = insets.getInsetsIgnoringVisibility(
                     WindowInsets.Type.mandatorySystemGestures()).bottom;
+            Insets bars = insets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            boolean changed = false;
             if (gestureBottomInset != bottom) {
                 gestureBottomInset = bottom;
-                applyLetterbox();
+                changed = true;
             }
+            if (systemTopInset != bars.top) {
+                systemTopInset = bars.top;
+                changed = true;
+            }
+            if (changed) applyLetterbox();
             return insets;
         });
         root.requestApplyInsets();
@@ -220,7 +233,10 @@ public final class Mirror extends Activity {
         View v = surfaceView;
         if (v == null || root == null || session == null) return;
         int cw = root.getWidth(), ch = root.getHeight();
-        int availableH = ch - gestureBottomInset;
+        // Full-window letterbox only when immersive hide succeeded; otherwise
+        // keep the picture clear of the (visible) top system bar / cutout.
+        int topInset = (state == State.CONNECTED && immersiveOk) ? 0 : systemTopInset;
+        int availableH = ch - gestureBottomInset - topInset;
         int tw = connectedW, th = connectedH;
         if (cw <= 0 || availableH <= 0 || tw <= 0 || th <= 0) return;
 
@@ -228,7 +244,7 @@ public final class Mirror extends Activity {
         int w = Math.min(cw, Math.max(1, Math.round(tw * scale)));
         int h = Math.min(availableH, Math.max(1, Math.round(th * scale)));
         int x = (cw - w) / 2;
-        int y = (availableH - h) / 2;
+        int y = topInset + (availableH - h) / 2;
 
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
         if (lp.width != w || lp.height != h || lp.leftMargin != x
@@ -239,8 +255,8 @@ public final class Mirror extends Activity {
             lp.topMargin = y;
             lp.gravity = Gravity.TOP | Gravity.START;
             v.setLayoutParams(lp);   // re-layout re-enters here, then converges
-            Log.i("mirror: letterbox %dx%d -> %dx%d in %dx%d gesture_bottom=%d",
-                    tw, th, w, h, cw, ch, gestureBottomInset);
+            Log.i("mirror: letterbox %dx%d -> %dx%d in %dx%d top=%d gesture_bottom=%d immersive=%s",
+                    tw, th, w, h, cw, ch, topInset, gestureBottomInset, immersiveOk);
         }
         session.setViewport(connectedGeometryVersion, x, y, w, h);
     }
@@ -273,6 +289,7 @@ public final class Mirror extends Activity {
                     state = State.CONNECTED;
                     connectedGeometryVersion = geometryVersion;
                     connectedW = w; connectedH = h;
+                    syncTargetFromSession();
                     updateStatusBar();
                     applyLetterbox();
                     if (session != null) session.syncClipboard();
@@ -389,6 +406,11 @@ public final class Mirror extends Activity {
         if (statusBar != null) {
             statusBar.setVisibility(state == State.CONNECTED ? View.GONE : View.VISIBLE);
         }
+        if (state == State.CONNECTED) {
+            immersive();
+        } else {
+            showSystemBarsForStatus();
+        }
     }
 
     // ---- input ----
@@ -466,7 +488,10 @@ public final class Mirror extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && session != null) session.syncClipboard();
+        if (hasFocus) {
+            if (state == State.CONNECTED) immersive();
+            if (session != null) session.syncClipboard();
+        }
     }
 
     // Android 13+ requires runtime grant for POST_NOTIFICATIONS. The
@@ -497,11 +522,26 @@ public final class Mirror extends Activity {
     // malformed internal intent must not create a session for an unsaved row.
     private Devices.Device resolveTarget(String host, int port) {
         try {
-            return Devices.find(this, host, port);
+            Devices.Device exact = Devices.find(this, host, port);
+            if (exact != null) return exact;
+            // Port may have been rediscovered/upserted (e.g. reboot → new TLS port).
+            for (Devices.Device d : Devices.load(this)) {
+                if (d.host.equals(host)) return d;
+            }
+            return null;
         } catch (java.io.IOException e) {
             Log.e(e, "mirror: cannot read paired devices");
             return null;
         }
+    }
+
+    private void syncTargetFromSession() {
+        if (session == null) return;
+        Devices.Device ep = session.getTarget();
+        if (ep == null) return;
+        if (target != null && target.host.equals(ep.host) && target.port == ep.port) return;
+        target = ep;
+        startKeepalive();
     }
 
     // The foreground service exists only to keep this process alive while
@@ -515,7 +555,7 @@ public final class Mirror extends Activity {
     }
 
     @SuppressWarnings("deprecation")
-    private void immersive() {
+    private void prepareEdgeToEdge() {
         // Without this the window stops at the cutout's safe area and the
         // system letterboxes it, which shows up as black bands down the
         // sides of what is supposed to be a full-screen mirror. Only the
@@ -524,28 +564,50 @@ public final class Mirror extends Activity {
         lp.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         getWindow().setAttributes(lp);
+        getWindow().setDecorFitsSystemWindows(false);
+    }
 
+    private void immersive() {
         WindowInsetsController c = getWindow().getInsetsController();
         if (c != null) {
             c.hide(WindowInsets.Type.systemBars());
             c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            immersiveOk = true;
+        } else {
+            immersiveOk = false;
         }
-        getWindow().setDecorFitsSystemWindows(false);
+        applyLetterbox();
+    }
+
+    private void showSystemBarsForStatus() {
+        WindowInsetsController c = getWindow().getInsetsController();
+        if (c != null) {
+            c.show(WindowInsets.Type.systemBars());
+        }
+        immersiveOk = false;
+        applyLetterbox();
     }
 
     private void insetStatusBar() {
         int base = getResources().getDimensionPixelSize(R.dimen.space_sm);
         statusBar.setOnApplyWindowInsetsListener((view, windowInsets) -> {
-            Insets cutout = windowInsets.getInsetsIgnoringVisibility(
-                    WindowInsets.Type.displayCutout());
+            // While CONNECTING/DISCONNECTED the pill must clear both the
+            // status bar and any display cutout — cutout-only left it under
+            // the system status area on many devices.
+            Insets bars = windowInsets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) view.getLayoutParams();
-            int left = base + cutout.left;
-            int top = base + cutout.top;
-            int right = base + cutout.right;
+            int left = base + bars.left;
+            int top = base + bars.top;
+            int right = base + bars.right;
             if (lp.leftMargin != left || lp.topMargin != top
                     || lp.rightMargin != right || lp.bottomMargin != base) {
                 lp.setMargins(left, top, right, base);
                 view.setLayoutParams(lp);
+            }
+            if (systemTopInset != bars.top) {
+                systemTopInset = bars.top;
+                applyLetterbox();
             }
             return windowInsets;
         });

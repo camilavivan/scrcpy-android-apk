@@ -19,17 +19,16 @@ public final class Settings {
     public static final String LOW_LATENCY   = "low_latency";     // prefer low-latency encoder
     public static final String HINT_BACK_SHOWN = "hint_back_shown"; // first-run UI hint
     public static final String CLIPBOARD       = "clipboard";       // two-way clipboard sync
+    public static final String FIXED_ADB_PORT_ENABLED = "fixed_adb_port_enabled";
+    public static final String FIXED_ADB_PORT         = "fixed_adb_port";
 
     public static final String DEFAULT_VIDEO_CODEC    = "h264";
     public static final String DEFAULT_AUDIO_CODEC    = "opus";
-    // Defaults sized for the worst link this is meant to work over, not
-    // the best. The constraint is the target's UPLINK: an uncapped
-    // stream at 8 Mbit/s is fine on a LAN and unusable over a VPN or a
-    // home broadband uplink, which is a supported way to reach a target.
-    // 1080p at 4 Mbit/s looks fine on a phone and fits an ordinary
-    // uplink; raise both in Settings when both devices are on the LAN.
-    public static final int    DEFAULT_MAX_SIZE       = 1080;
-    public static final int    DEFAULT_VIDEO_BIT_RATE = 4_000_000;
+    // Default = "流畅" preset: 720p @ 6 Mbit/s @ 60 fps H.264 with
+    // low-latency keyframes. Smooth on typical Wi-Fi / VPN uplinks;
+    // use the "画质" preset (or raise knobs) on a strong LAN.
+    public static final int    DEFAULT_MAX_SIZE       = 720;
+    public static final int    DEFAULT_VIDEO_BIT_RATE = 6_000_000;
     public static final int    DEFAULT_MAX_FPS        = 60;
     public static final boolean DEFAULT_LOW_LATENCY  = true;
     // On by default: it is a headline feature and the target is one the
@@ -38,6 +37,8 @@ public final class Settings {
     // can read whatever is copied on this device and write anything it
     // likes back - and because there was previously no way to decline.
     public static final boolean DEFAULT_CLIPBOARD     = true;
+    public static final boolean DEFAULT_FIXED_ADB_PORT_ENABLED = true;
+    public static final int     DEFAULT_FIXED_ADB_PORT = 9527;
 
     private Settings() {}
 
@@ -71,7 +72,7 @@ public final class Settings {
         int value = integer(ctx, VIDEO_BIT_RATE, DEFAULT_VIDEO_BIT_RATE);
         switch (value) {
             case 1_000_000: case 2_000_000: case 4_000_000:
-            case 8_000_000: case 16_000_000:
+            case 6_000_000: case 8_000_000: case 16_000_000:
                 return value;
             default:
                 return DEFAULT_VIDEO_BIT_RATE;
@@ -101,7 +102,7 @@ public final class Settings {
 
     public static void setVideoBitRate(Context ctx, int v) {
         if (v != 1_000_000 && v != 2_000_000 && v != 4_000_000
-                && v != 8_000_000 && v != 16_000_000) {
+                && v != 6_000_000 && v != 8_000_000 && v != 16_000_000) {
             throw new IllegalArgumentException("invalid video bit rate");
         }
         prefs(ctx).edit().putInt(VIDEO_BIT_RATE, v).apply();
@@ -147,6 +148,31 @@ public final class Settings {
 
     public static void setClipboardSync(Context ctx, boolean v) {
         prefs(ctx).edit().putBoolean(CLIPBOARD, v).apply();
+    }
+
+    public static boolean fixedAdbPortEnabled(Context ctx) {
+        return bool(ctx, FIXED_ADB_PORT_ENABLED, DEFAULT_FIXED_ADB_PORT_ENABLED);
+    }
+
+    public static void setFixedAdbPortEnabled(Context ctx, boolean v) {
+        prefs(ctx).edit().putBoolean(FIXED_ADB_PORT_ENABLED, v).apply();
+    }
+
+    // Stable wireless ADB listen port. Privileged ports (<1024) are rejected.
+    public static int fixedAdbPort(Context ctx) {
+        int value = integer(ctx, FIXED_ADB_PORT, DEFAULT_FIXED_ADB_PORT);
+        return isValidFixedAdbPort(value) ? value : DEFAULT_FIXED_ADB_PORT;
+    }
+
+    public static void setFixedAdbPort(Context ctx, int v) {
+        if (!isValidFixedAdbPort(v)) {
+            throw new IllegalArgumentException("fixed ADB port must be 1024-65535");
+        }
+        prefs(ctx).edit().putInt(FIXED_ADB_PORT, v).apply();
+    }
+
+    public static boolean isValidFixedAdbPort(int port) {
+        return port >= 1024 && port <= 65535;
     }
 
     private static String string(Context ctx, String key, String fallback) {
