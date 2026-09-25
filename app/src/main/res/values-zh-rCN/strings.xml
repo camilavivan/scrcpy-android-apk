@@ -107,15 +107,9 @@
     <string name="paired_saved_verify_failed">已配对并保存，但连接校验失败（可能是网络隔离），仍可稍后重试连接。</string>
     <string name="qr_autosaved">已配对并自动保存连接地址</string>
 
-    <string name="fixed_adb_port_section">固定 ADB 端口</string>
-    <string name="fixed_adb_port_enabled">启用固定 ADB 端口（便于断线重连）</string>
-    <string name="fixed_adb_port_label">端口（1024–65535）</string>
-    <string name="fixed_adb_port_hint">9527</string>
-    <string name="fixed_adb_port_caption">首次用无线调试配对并连接成功后，会把对方 adbd 切到该端口并改写已保存设备地址；重启手机后可能需重新执行一次。</string>
-    <string name="fixed_adb_port_invalid">固定 ADB 端口须为 1024 到 65535 之间的数字</string>
 
     <string name="reconnect_after_reboot">重启后重连</string>
-    <string name="reconnect_by_ip_help">手机重启后无线调试端口会变。只需输入 IP，即可通过局域网重新发现连接端口并重连（无需配对码）。</string>
+    <string name="reconnect_by_ip_help">每次重新打开「无线调试」后连接端口都会变，应用会通过局域网自动发现当前 TLS 连接端口，无需固定端口。重启后只需输入 IP 即可重连（无需配对码）。</string>
     <string name="label_reconnect_ip">设备 IP</string>
     <string name="sub_reconnect_ip">与被控端同一局域网的 IPv4 地址</string>
     <string name="reconnect_ip_hint">192.168.31.25</string>
@@ -128,8 +122,6 @@
     <string name="rediscover_port">按 IP 重新发现端口</string>
     <string name="device_actions_title">设备操作</string>
 
-    <string name="fixed_adb_port_locked">已固定端口 %1$d，之后可直接重连</string>
-    <string name="reconnect_temp_port_lock_failed">已用临时端口重连；固定端口锁定失败（重启后常见），可稍后再试锁定。</string>
     <string name="wireless_debug_port_none">未发现无线调试端口，请在被控端重新打开「无线调试」。</string>
     <string name="streaming_presets">串流预设</string>
     <string name="streaming_presets_caption">流畅：720p / 6Mbps / 60fps / H.264，低延迟。画质：1080p / 8Mbps / 60fps / H.264，低延迟。点按后立即写入设置，下次连接生效。</string>

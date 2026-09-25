@@ -106,15 +106,9 @@
     <string name="paired_saved_verify_failed">Paired and saved, but connect verify failed (possible network isolation). You can retry connecting later.</string>
     <string name="qr_autosaved">Paired and connect address auto-saved</string>
 
-    <string name="fixed_adb_port_section">Fixed ADB port</string>
-    <string name="fixed_adb_port_enabled">Enable fixed ADB port (easier reconnect)</string>
-    <string name="fixed_adb_port_label">Port (1024–65535)</string>
-    <string name="fixed_adb_port_hint">9527</string>
-    <string name="fixed_adb_port_caption">After the first successful wireless-debug pair and connect, adbd is switched to this port and the saved device address is updated. After rebooting the phone you may need to run this once more.</string>
-    <string name="fixed_adb_port_invalid">Fixed ADB port must be a number from 1024 to 65535</string>
 
     <string name="reconnect_after_reboot">Reconnect after reboot</string>
-    <string name="reconnect_by_ip_help">After the phone reboots, the wireless-debug port changes. Enter only the IP to rediscover the connect port on the LAN and reconnect (no pairing code).</string>
+    <string name="reconnect_by_ip_help">The connect port changes every time Wireless debugging is turned back on. This app discovers the current TLS connect port on the LAN automatically — no fixed port needed. After reboot, enter only the IP to reconnect (no pairing code).</string>
     <string name="label_reconnect_ip">Device IP</string>
     <string name="sub_reconnect_ip">IPv4 address on the same LAN as the target</string>
     <string name="reconnect_ip_hint">192.168.31.25</string>
@@ -127,8 +121,6 @@
     <string name="rediscover_port">Rediscover port by IP</string>
     <string name="device_actions_title">Device actions</string>
 
-    <string name="fixed_adb_port_locked">Port locked to %1$d — you can reconnect directly later</string>
-    <string name="reconnect_temp_port_lock_failed">Reconnected on a temporary port; fixed-port lock failed (common after reboot). Try locking again later.</string>
     <string name="wireless_debug_port_none">No wireless-debug port found. Re-enable Wireless debugging on the target device.</string>
     <string name="streaming_presets">Streaming presets</string>
     <string name="streaming_presets_caption">Smooth: 720p / 6Mbps / 60fps / H.264, low latency. Quality: 1080p / 8Mbps / 60fps / H.264, low latency. Applied immediately; takes effect on the next connection.</string>

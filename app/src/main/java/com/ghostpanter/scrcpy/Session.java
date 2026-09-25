@@ -126,7 +126,7 @@ public final class Session {
         runner.start();
     }
 
-    // Current endpoint (may change after rediscovery / fixed-port lock).
+    // Current endpoint (may change after mDNS rediscovery of TLS connect port).
     public Devices.Device getTarget() {
         return target;
     }
@@ -387,17 +387,9 @@ public final class Session {
             target = discovered;
         }
         Log.i("adb connect ok at %s", endpoint);
-
-        // Switch ephemeral wireless-debug port to a stable tcpip port when enabled.
-        // Best-effort: lock failure must not rewrite the caller to a dead fixed port.
-        try {
-            endpoint = FixedAdbPort.applyIfNeeded(ctx, adb, endpoint);
-        } catch (Exception lockErr) {
-            Log.w("session: fixed-port lock failed (keeping %s): %s", endpoint, lockErr);
-        }
         if (endpoint != target) {
             target = endpoint;
-            Log.i("session: using endpoint %s", endpoint);
+            Log.i("session: using rediscovered endpoint %s", endpoint);
         }
 
         Server srv = null;
@@ -479,13 +471,10 @@ public final class Session {
     }
 
 
-    // After reboot, saved fixed tcpip ports are often dead while wireless
-    // debugging advertises a new ephemeral _adb-tls-connect port.
+    // Wireless-debug TLS connect ports change whenever Wireless debugging is
+    // toggled or the phone reboots. On connect failure, rediscover via mDNS.
     private boolean shouldRediscover(Devices.Device endpoint, Exception err) {
         if (endpoint == null || err == null) return false;
-        boolean onFixed = Settings.fixedAdbPortEnabled(ctx)
-                && endpoint.port == Settings.fixedAdbPort(ctx);
-        if (onFixed) return true;
         if (err instanceof ConnectException
                 || err instanceof SocketTimeoutException
                 || err instanceof NoRouteToHostException) {

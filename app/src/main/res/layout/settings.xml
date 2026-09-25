@@ -354,50 +354,6 @@
 
         </LinearLayout>
 
-        <LinearLayout
-            style="@style/Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content">
-
-            <TextView
-                style="@style/SectionHeader"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/fixed_adb_port_section"/>
-
-            <CheckBox
-                android:id="@+id/fixed_adb_port_enabled"
-                style="@style/RadioOption"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/fixed_adb_port_enabled"/>
-
-            <TextView
-                style="@style/Caption"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingTop="@dimen/space_sm"
-                android:text="@string/fixed_adb_port_label"/>
-
-            <EditText
-                android:id="@+id/fixed_adb_port"
-                style="@style/Field"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_sm"
-                android:hint="@string/fixed_adb_port_hint"
-                android:inputType="number"
-                android:maxLength="5"
-                android:importantForAutofill="no"/>
-
-            <TextView
-                style="@style/Caption"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingTop="@dimen/space_sm"
-                android:text="@string/fixed_adb_port_caption"/>
-
-        </LinearLayout>
 
         <LinearLayout
             style="@style/Card"

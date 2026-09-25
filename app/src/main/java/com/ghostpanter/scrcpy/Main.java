@@ -344,8 +344,9 @@ public final class Main extends Activity {
         pairPort.setText(String.valueOf(ep.port));
     }
 
-    // Rediscover connect port for an already-paired host (IP only), connect,
-    // optionally re-lock fixed tcpip port, upsert, toast, optionally open Mirror.
+    // Rediscover connect port for an already-paired host (IP only) via mDNS
+    // _adb-tls-connect._tcp, connect, upsert discovered host:port, toast,
+    // optionally open Mirror. Never locks a fixed tcpip port.
     private void reconnectByIp(String ip, boolean openMirror) {
         try {
             Log.i("reconnect-by-ip: discover connect for %s", ip);
@@ -363,35 +364,19 @@ public final class Main extends Activity {
             Devices.Device connect = new Devices.Device(ep.host, ep.port);
             Log.i("reconnect-by-ip: connect %s", connect);
             adb.connect(connect.host, connect.port);
-            boolean wantedLock = Settings.fixedAdbPortEnabled(getApplicationContext())
-                    && connect.port != Settings.fixedAdbPort(getApplicationContext());
-            try {
-                connect = FixedAdbPort.applyIfNeeded(getApplicationContext(), adb, connect);
-            } catch (Exception lockErr) {
-                // Keep the working discovered TLS endpoint — never rewrite to a dead fixed port.
-                Log.w("reconnect-by-ip: fixed-port lock failed (keeping %s): %s",
-                        connect, lockErr);
-            }
-            boolean lockFailed = wantedLock
-                    && connect.port != Settings.fixedAdbPort(getApplicationContext());
+
             try { adb.disconnect(); } catch (Exception ignored) {}
 
             List<Devices.Device> updated = Devices.upsertHost(getApplicationContext(), connect);
             Devices.Device saved = connect;
-            boolean showLockFail = lockFailed;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 showDevices(updated);
                 reconnectIp.setText(AdbDiscovery.isIpv4(saved.host)
                         ? AdbDiscovery.normalizeIpv4(saved.host)
                         : saved.host);
-                if (showLockFail) {
-                    Toast.makeText(this, R.string.reconnect_temp_port_lock_failed,
-                            Toast.LENGTH_LONG).show();
-                } else {
-                    Toast.makeText(this, getString(R.string.reconnect_ok, saved.toString()),
-                            Toast.LENGTH_SHORT).show();
-                }
+                Toast.makeText(this, getString(R.string.reconnect_ok, saved.toString()),
+                        Toast.LENGTH_SHORT).show();
                 reenableButtons();
                 if (openMirror) {
                     Intent i = new Intent(this, Mirror.class);
@@ -531,13 +516,6 @@ public final class Main extends Activity {
                 adb.connect(connect.host, connect.port);
                 verified = true;
                 Log.i("pair: probe connect ok");
-                // Lock to fixed ADB port while the probe session is live (best-effort).
-                try {
-                    connect = FixedAdbPort.applyIfNeeded(getApplicationContext(), adb, connect);
-                } catch (Exception lockErr) {
-                    // Keep the verified connect endpoint — do not rewrite to a dead fixed port.
-                    Log.w("pair: fixed-port lock failed (keeping %s): %s", connect, lockErr);
-                }
                 try { adb.disconnect(); } catch (Exception ignored) {}
             } catch (Exception probe) {
                 Log.w("pair: probe connect failed (still saving): %s", probe);

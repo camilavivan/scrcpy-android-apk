@@ -6,7 +6,6 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.WindowInsets;
 import android.widget.CheckBox;
-import android.widget.EditText;
 import android.widget.Toast;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -104,18 +103,6 @@ public final class SettingsActivity extends Activity {
             Log.i("settings: clipboard=%b", checked);
         });
 
-        CheckBox fixedPortBox = findViewById(R.id.fixed_adb_port_enabled);
-        EditText fixedPortField = findViewById(R.id.fixed_adb_port);
-        fixedPortField.setEnabled(fixedPortBox.isChecked());
-        fixedPortBox.setOnCheckedChangeListener((b, checked) -> {
-            Settings.setFixedAdbPortEnabled(this, checked);
-            fixedPortField.setEnabled(checked);
-            Log.i("settings: fixed_adb_port_enabled=%b", checked);
-        });
-        fixedPortField.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) persistFixedAdbPort(fixedPortField);
-        });
-
         // One-tap streaming presets. Persist like any other setting;
         // next connection applies them (same as manual radio changes).
         findViewById(R.id.preset_smooth).setOnClickListener(v ->
@@ -178,36 +165,6 @@ public final class SettingsActivity extends Activity {
         }
         ((CheckBox) findViewById(R.id.low_latency)).setChecked(Settings.lowLatency(this));
         ((CheckBox) findViewById(R.id.clipboard_sync)).setChecked(Settings.clipboardSync(this));
-        ((CheckBox) findViewById(R.id.fixed_adb_port_enabled))
-                .setChecked(Settings.fixedAdbPortEnabled(this));
-        ((EditText) findViewById(R.id.fixed_adb_port))
-                .setText(String.valueOf(Settings.fixedAdbPort(this)));
-    }
-
-    @Override
-    protected void onPause() {
-        EditText fixedPortField = findViewById(R.id.fixed_adb_port);
-        if (fixedPortField != null) persistFixedAdbPort(fixedPortField);
-        super.onPause();
-    }
-
-    private void persistFixedAdbPort(EditText field) {
-        String raw = field.getText() == null ? "" : field.getText().toString().trim();
-        int port;
-        try {
-            port = Integer.parseInt(raw);
-        } catch (NumberFormatException e) {
-            Toast.makeText(this, R.string.fixed_adb_port_invalid, Toast.LENGTH_LONG).show();
-            field.setText(String.valueOf(Settings.fixedAdbPort(this)));
-            return;
-        }
-        if (!Settings.isValidFixedAdbPort(port)) {
-            Toast.makeText(this, R.string.fixed_adb_port_invalid, Toast.LENGTH_LONG).show();
-            field.setText(String.valueOf(Settings.fixedAdbPort(this)));
-            return;
-        }
-        Settings.setFixedAdbPort(this, port);
-        Log.i("settings: fixed_adb_port=%d", port);
     }
 
     @SuppressWarnings("deprecation")

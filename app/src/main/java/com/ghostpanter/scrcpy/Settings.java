@@ -19,8 +19,6 @@ public final class Settings {
     public static final String LOW_LATENCY   = "low_latency";     // prefer low-latency encoder
     public static final String HINT_BACK_SHOWN = "hint_back_shown"; // first-run UI hint
     public static final String CLIPBOARD       = "clipboard";       // two-way clipboard sync
-    public static final String FIXED_ADB_PORT_ENABLED = "fixed_adb_port_enabled";
-    public static final String FIXED_ADB_PORT         = "fixed_adb_port";
 
     public static final String DEFAULT_VIDEO_CODEC    = "h264";
     public static final String DEFAULT_AUDIO_CODEC    = "opus";
@@ -37,8 +35,6 @@ public final class Settings {
     // can read whatever is copied on this device and write anything it
     // likes back - and because there was previously no way to decline.
     public static final boolean DEFAULT_CLIPBOARD     = true;
-    public static final boolean DEFAULT_FIXED_ADB_PORT_ENABLED = true;
-    public static final int     DEFAULT_FIXED_ADB_PORT = 9527;
 
     private Settings() {}
 
@@ -150,30 +146,6 @@ public final class Settings {
         prefs(ctx).edit().putBoolean(CLIPBOARD, v).apply();
     }
 
-    public static boolean fixedAdbPortEnabled(Context ctx) {
-        return bool(ctx, FIXED_ADB_PORT_ENABLED, DEFAULT_FIXED_ADB_PORT_ENABLED);
-    }
-
-    public static void setFixedAdbPortEnabled(Context ctx, boolean v) {
-        prefs(ctx).edit().putBoolean(FIXED_ADB_PORT_ENABLED, v).apply();
-    }
-
-    // Stable wireless ADB listen port. Privileged ports (<1024) are rejected.
-    public static int fixedAdbPort(Context ctx) {
-        int value = integer(ctx, FIXED_ADB_PORT, DEFAULT_FIXED_ADB_PORT);
-        return isValidFixedAdbPort(value) ? value : DEFAULT_FIXED_ADB_PORT;
-    }
-
-    public static void setFixedAdbPort(Context ctx, int v) {
-        if (!isValidFixedAdbPort(v)) {
-            throw new IllegalArgumentException("fixed ADB port must be 1024-65535");
-        }
-        prefs(ctx).edit().putInt(FIXED_ADB_PORT, v).apply();
-    }
-
-    public static boolean isValidFixedAdbPort(int port) {
-        return port >= 1024 && port <= 65535;
-    }
 
     private static String string(Context ctx, String key, String fallback) {
         try {
